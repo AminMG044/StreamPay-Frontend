@@ -134,5 +134,5 @@ async function handleMetricsGet(request: Request): Promise<NextResponse> {
 export async function GET(request: Request): Promise<Response> {
   return withRouteSpan("/api/metrics", () =>
     withRouteTimeout(request, () => handleMetricsGet(request)),
-  );
+  )(request);
 }

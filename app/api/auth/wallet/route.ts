@@ -2,6 +2,7 @@ import { NextResponse, NextRequest } from "next/server";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { errorResponse, ErrorCode } from "@/app/lib/errors/server";
 import { validateCsrfToken } from "@/app/lib/auth";
+import { getCsrfCookieValue, getCsrfHeaderValue } from "@/lib/csrf";
 import { checkIpRateLimit, walletIpRateLimitResponse as rateLimitResponse } from "@/src/middleware/rateLimit";
 import { getCorrelationContext, logger } from "@/app/lib/logger";
 import { withRouteSpan } from "@/lib/routeSpan";
@@ -505,8 +506,11 @@ async function handleWalletVerifyPost(req: NextRequest) {
             signature: string;
           };
 
-          const csrfCookie = req.cookies.get("csrf-token")?.value ?? null;
-          const csrfHeader = req.headers.get("x-csrf-token");
+          // Read both the legacy `csrf-token` and the `__Host-csrf-token`
+          // cookie through the shared helper so the handler stays in sync
+          // with the middleware.
+          const csrfCookie = getCsrfCookieValue(req);
+          const csrfHeader = getCsrfHeaderValue(req);
 
           // Double-submit cookie check
           if (!validateCsrfToken(csrfCookie, csrfHeader)) {
@@ -589,9 +593,9 @@ async function handleWalletVerifyPost(req: NextRequest) {
 // ── Route instrumentation ────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  return withRouteSpan("/api/auth/wallet", () => handleWalletChallengeGet(req));
+  return withRouteSpan("/api/auth/wallet", () => handleWalletChallengeGet(req))(req);
 }
 
 export async function POST(req: NextRequest) {
-  return withRouteSpan("/api/auth/wallet", () => handleWalletVerifyPost(req));
+  return withRouteSpan("/api/auth/wallet", () => handleWalletVerifyPost(req))(req);
 }

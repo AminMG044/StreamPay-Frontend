@@ -212,23 +212,11 @@ function createErrorResponse(code: string, message: string, status: number) {
 /**
  * Validates double-submit CSRF tokens using constant-time comparison.
  * Protects wallet authentication endpoints from timing and CSRF attacks.
+ *
+ * The single implementation lives in `lib/csrf.ts` so the middleware and the
+ * route handlers can never drift apart.
  */
-export function validateCsrfToken(cookieToken: string | null, headerToken: string | null): boolean {
-  if (!cookieToken || !headerToken) return false;
-
-  try {
-    const bufCookie = Buffer.from(cookieToken);
-    const bufHeader = Buffer.from(headerToken);
-
-    if (bufCookie.length !== bufHeader.length) {
-      return false;
-    }
-
-    return crypto.timingSafeEqual(bufCookie, bufHeader);
-  } catch {
-    return false;
-  }
-}
+export { validateCsrfToken } from "@/lib/csrf";
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

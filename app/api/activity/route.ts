@@ -84,5 +84,5 @@ async function handleActivityGet(request: Request) {
 export async function GET(request: Request) {
   return withRouteSpan("/api/activity", () =>
     withRouteTimeout(request, () => handleActivityGet(request)),
-  );
+  )(request);
 }
