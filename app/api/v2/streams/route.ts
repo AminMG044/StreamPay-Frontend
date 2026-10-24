@@ -74,13 +74,21 @@ async function handleV2StreamsGet(request: Request) {
   const statusFilter = query.status ?? null;
   const limit = query.limit ?? 20;
 
+  const tenant = resolveRequestTenant(request);
+  const actor = resolveRequestActor(request);
+  const isVisible = visibleTo(actor, tenant);
+
   const { streamRepository } = getStore();
-  const sortedStreams = Array.from(
-    streamRepository.streams.values() as Iterable<Stream>,
-  ).sort((a, b) => {
-    const timeCompare = a.createdAt.localeCompare(b.createdAt);
-    return timeCompare !== 0 ? timeCompare : a.id.localeCompare(b.id);
-  });
+  const tenantCandidates = streamRepository.listByTenant
+    ? streamRepository.listByTenant(tenant)
+    : Array.from(streamRepository.streams.values() as Iterable<Stream>);
+
+  const sortedStreams = tenantCandidates
+    .filter(isVisible)
+    .sort((a, b) => {
+      const timeCompare = a.createdAt.localeCompare(b.createdAt);
+      return timeCompare !== 0 ? timeCompare : a.id.localeCompare(b.id);
+    });
 
   let streams = statusFilter
     ? sortedStreams.filter((stream) => stream.status === statusFilter)
@@ -92,7 +100,7 @@ async function handleV2StreamsGet(request: Request) {
       keyset = decodeStreamCursor(cursor, {
         resolveLegacyId: (legacyId) => {
           const legacy = streamRepository.streams.get(legacyId);
-          if (!legacy) {
+          if (!legacy || !isVisible(legacy)) {
             return null;
           }
           logger.warn("Deprecated plain-id pagination cursor used", {
@@ -108,9 +116,20 @@ async function handleV2StreamsGet(request: Request) {
         422,
       );
     }
+
+    const cursorTarget = streamRepository.streams.get(keyset.id);
+    if (cursorTarget && !isVisible(cursorTarget)) {
+      return errorResponse(
+        "INVALID_CURSOR",
+        "Cursor is malformed or refers to a stream that no longer exists.",
+        422,
+      );
+    }
+
     streams = streams.filter((stream) => isAfterCursor(stream, keyset));
   }
 
+  const total = streams.length;
   const page = streams.slice(0, limit);
   const hasNext = streams.length > limit;
   const nextCursor =
@@ -132,7 +151,21 @@ async function handleV2StreamsGet(request: Request) {
     streams: projected,
     meta: { hasNext, nextCursor, total: streamRepository.streams.size },
     links: { self: `/api/v2/streams?limit=${limit}` },
-  });
+  };
+  const etag = createStrongEtag(payload);
+
+  if (isIfNoneMatchMatch(etag, request.headers?.get?.("if-none-match") ?? null)) {
+    return new NextResponse(null, {
+      status: 304,
+      headers: createCacheHeaders(etag),
+    });
+  }
+
+  const response = NextResponse.json(payload);
+  for (const [name, value] of Object.entries(createCacheHeaders(etag))) {
+    response.headers.set(name, value);
+  }
+  return response;
 }
 
 export async function GET(request: Request) {
@@ -203,6 +236,11 @@ async function handleV2StreamsPost(request: Request) {
 
   const id = `stream-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
+  const explicitTenant =
+    request.headers.get("x-tenant-id")?.trim() ||
+    request.headers.get("x-streampay-tenant-id")?.trim() ||
+    undefined;
+  const actor = resolveRequestActor(request);
   const newStream: Stream = {
     id,
     recipient: String(recipient),

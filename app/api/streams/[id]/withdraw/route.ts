@@ -3,7 +3,7 @@ import { streamsRateLimit } from "@/src/middleware/rateLimit";
 import { db, withLock } from "@/app/lib/db";
 import { withIdempotency, withdrawStore } from "@/app/lib/idempotency";
 import { getCorrelationContext, logger } from "@/app/lib/logger";
-import { checkStreamOrgPolicy } from "@/app/lib/org-policy";
+import { enforceStreamRbac, resolveActorAddress } from "@/app/lib/org-policy";
 import { recordPrivilegedStreamAuditEvent } from "@/app/lib/audit-log";
 import { appendStreamHistoryEvent } from "@/app/lib/stream-history-writer";
 import { publishStreamChange } from "@/app/lib/stream-publish";
@@ -35,105 +35,20 @@ function getHeader(request: Request, name: string): string | null {
   return request.headers?.get?.(name) ?? null;
 }
 
-function resolveCallerAddress(request: Request): string | null {
-  const actor = tryAuthenticateRequest(request);
-  if (actor?.walletAddress) return actor.walletAddress;
-
-  const header = getHeader(request, "Actor-Wallet-Address");
-  return header?.trim() || null;
-}
-
-function validationError(message: string) {
-  return createErrorResponse("VALIDATION_ERROR", message, 422);
-}
-
-async function readJsonBody(request: Request): Promise<
-  { ok: true; body: unknown } | { ok: false; message: string }
-> {
-  let text: string | undefined;
-
-  if (typeof (request as any).text === "function") {
-    try {
-      text = await request.text();
-    } catch {
-      return { ok: false, message: "Unable to read request body." };
-    }
-  } else if (typeof (request as any).json === "function") {
-    try {
-      return { ok: true, body: await request.json() };
-    } catch {
-      return { ok: false, message: "Request body must be valid JSON." };
-    }
-  }
-
-  if (!text || text.trim().length === 0) {
-    return { ok: true, body: null };
-  }
-
-  try {
-    return { ok: true, body: JSON.parse(text) };
-  } catch {
-    return { ok: false, message: "Request body must be valid JSON." };
-  }
-}
-
-async function parseRequestedAmount(
-  request: Request,
-): Promise<
-  { ok: true; requestedAmount?: bigint } | { ok: false; message: string }
-> {
-  const parsedBody = await readJsonBody(request);
-  if (!parsedBody.ok) return parsedBody;
-
-  const body = parsedBody.body;
-  if (body === null || body === undefined) {
-    return { ok: true };
-  }
-
-  if (typeof body !== "object" || Array.isArray(body)) {
-    return { ok: false, message: "Request body must be a JSON object." };
-  }
-
-  const value = (body as Record<string, unknown>).amount;
-  if (value === undefined) {
-    return { ok: true };
-  }
-
-  if (typeof value !== "string" || !/^\d+$/.test(value)) {
-    return {
-      ok: false,
-      message: "amount must be a non-negative raw i128 integer string.",
-    };
-  }
-
-  let requestedAmount: bigint;
-  try {
-    requestedAmount = BigInt(value);
-  } catch {
-    return {
-      ok: false,
-      message: "amount must be a non-negative raw i128 integer string.",
-    };
-  }
-
-  if (requestedAmount > I128_MAX) {
-    return { ok: false, message: "amount exceeds the maximum i128 value." };
-  }
-
-  return { ok: true, requestedAmount };
-}
-
-function withIdempotencyReadableBody(request: Request): Request {
-  try {
-    if (typeof (request as any).clone === "function") {
-      return request.clone();
-    }
-  } catch {
-    return request;
-  }
-  return request;
-}
-
+/**
+ * POST /api/streams/:id/withdraw
+ *
+ * Withdraws funds from an ended stream.
+ *
+ * Actor resolution order:
+ * 1. Verified JWT `sub` claim (Bearer token).
+ * 2. `Actor-Wallet-Address` header (fallback only when STREAMPAY_ALLOW_ACTOR_HEADER=true).
+ * If both are present and differ, returns 403 ACTOR_MISMATCH.
+ *
+ * RBAC ordering:
+ * Runs after 404 stream existence check and before state transition validation
+ * and ledger confirmation evaluation, inside the stream lock.
+ */
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -146,13 +61,11 @@ export async function POST(
     return rateCheck.response;
   }
 
-  const callerAddress = resolveCallerAddress(request);
-  if (!callerAddress) {
-    return createErrorResponse(
-      "UNAUTHORIZED",
-      "A verified caller identity is required to withdraw from a stream.",
-      401,
-    );
+  let actorAddress: string | null = null;
+  try {
+    actorAddress = resolveActorAddress(request);
+  } catch {
+    actorAddress = getHeader(request, "Actor-Wallet-Address");
   }
 
   // IDEMPOTENCY: Withdraw is non-idempotent by nature — this wrapper ensures retries return the original response without re-executing the withdrawal
@@ -163,37 +76,9 @@ export async function POST(
         return createErrorResponse("STREAM_NOT_FOUND", `Stream '${id}' not found`, 404);
       }
 
-      if (callerAddress !== stream.recipient) {
-        const policyResult = checkStreamOrgPolicy(id, callerAddress, "withdraw");
-        if (!policyResult) {
-          return createErrorResponse(
-            "RECIPIENT_AUTH_REQUIRED",
-            "Only the stream recipient or an authorized org member may withdraw.",
-            403,
-          );
-        }
-        if (!policyResult.allowed) {
-          if (policyResult.code === "ROLE_INSUFFICIENT") {
-            return createErrorResponse(
-              policyResult.code,
-              policyResult.message,
-              policyResult.httpStatus,
-            );
-          }
-          return createErrorResponse(
-            "RECIPIENT_AUTH_REQUIRED",
-            "Only the stream recipient or an authorized org member may withdraw.",
-            403,
-          );
-        }
-        if (policyResult.requiresApproval) {
-          return createErrorResponse(
-            "APPROVAL_REQUIRED",
-            "This action requires multi-sig approval. Please initiate an approval request.",
-            409,
-          );
-        }
-      }
+      // RBAC: evaluated inside the lock, immediately after 404 and before state guard or ledger check.
+      const rbacError = enforceStreamRbac(request, id, "withdraw");
+      if (rbacError) return rbacError;
 
       if (stream.status === "withdrawn") {
         const payload = { data: stream, withdrawal: stream.withdrawal };
@@ -275,7 +160,7 @@ export async function POST(
         fromStatus: "ended",
         toStatus: updated.status,
         at: new Date().toISOString(),
-        actorWallet: actorAddress,
+        actorWallet: actorAddress ?? undefined,
       });
       publishStreamChange({
         action: "withdraw",
