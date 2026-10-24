@@ -31,7 +31,12 @@ async function handleActivityGet(request: Request) {
   const type = searchParams.get("type");
   const limit = Math.min(Number.parseInt(searchParams.get("limit") || "20", 10), 100);
 
-  const spanContext = getCorrelationContext();
+  const headers = request instanceof Request ? request.headers : new Headers();
+  const request_id = resolveRequestId(headers);
+  const rawCorr = headers.get("x-correlation-id");
+  const correlation_id =
+    rawCorr && isValidRequestId(rawCorr) ? rawCorr : generateRequestId();
+
   const context = {
     correlation_id: request.headers.get("x-correlation-id") || `api-${crypto.randomUUID()}`,
     request_id: `req-${crypto.randomUUID()}`,

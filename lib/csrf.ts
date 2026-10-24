@@ -168,7 +168,7 @@ export function hasBearerCredential(request: NextRequest | Request): boolean {
 
   if (authorization) {
     const scheme = authorization.trim().split(/\s+/)[0]?.toLowerCase();
-    if (scheme === 'bearer' || scheme === 'basic') {
+    if (scheme === 'bearer') {
       return true;
     }
   }

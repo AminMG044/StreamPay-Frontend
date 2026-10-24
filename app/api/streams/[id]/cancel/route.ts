@@ -44,9 +44,8 @@ import {
   withLock,
 } from "@/app/lib/db";
 import { getCorrelationContext } from "@/app/lib/logger";
-import { checkStreamOrgPolicy, resolveActorAddress } from "@/app/lib/org-policy";
+import { enforceStreamRbac } from "@/app/lib/org-policy";
 import { orgDb } from "@/app/lib/org-db";
-import { tryAuthenticateRequest } from "@/app/lib/auth";
 import { recordPrivilegedStreamAuditEvent } from "@/app/lib/audit-log";
 import { appendStreamHistoryEvent } from "@/app/lib/stream-history-writer";
 import { publishStreamChange } from "@/app/lib/stream-publish";
@@ -62,10 +61,10 @@ import { webhookOutboxStore, toWebhookEvent } from "@/app/lib/webhook-outbox";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function createErrorResponse(code: string, message: string, status: number) {
+function createErrorResponse(code: string, message: string, status: number, legacyCode?: string) {
   const ctx = getCorrelationContext();
   return NextResponse.json(
-    { error: { code, message, request_id: ctx?.request_id } },
+    { error: { code, ...(legacyCode ? { legacy_code: legacyCode } : {}), message, request_id: ctx?.request_id } },
     { status },
   );
 }
@@ -146,53 +145,21 @@ export async function POST(
     }
 
     // ── Authorization ─────────────────────────────────────────────────────────
-    // Three ownership states:
-    // 1. Org-owned: org policy via RBAC helper (canceller role required)
-    // 2. Unclaimed (no recorded sender): 403 SENDER_UNKNOWN (never cancellable)
-    // 3. Individually owned: verified JWT actor must equal stream.senderAddress (otherwise 403 SENDER_AUTH_REQUIRED)
+    // Allow: stream sender OR org canceller role.
+    // The sender check uses the Actor-Wallet-Address header against
+    // stream.senderAddress (set at creation time).
+    const isSender = actorAddress && stream.senderAddress
+      ? actorAddress === stream.senderAddress
+      : false;
 
-    const isOrgOwned = orgDb.streamOwnership.has(id) || stream.ownership === "org";
-
-    if (isOrgOwned) {
-      if (!stream.senderAddress) {
-        return createErrorResponse(
-          "SENDER_UNKNOWN",
-          "Stream has no recorded sender and cannot be cancelled",
-          403,
-        );
+    if (!isSender) {
+      // Fall through to org-policy check.
+      const rbacError = enforceStreamRbac(request, id, "stop"); // "stop" covers canceller role
+      if (rbacError) {
+        return rbacError;
       }
-      const actor = resolveActorAddress(request);
-      if (!actor) {
-        return createErrorResponse(
-          "ACTOR_REQUIRED",
-          "A verified actor identity is required for this action.",
-          403,
-        );
-      }
-      const policyResult = checkStreamOrgPolicy(id, actor, "stop");
-      if (policyResult) {
-        if (!policyResult.allowed) {
-          return createErrorResponse(policyResult.code, policyResult.message, policyResult.httpStatus);
-        }
-        if (policyResult.requiresApproval) {
-          return createErrorResponse(
-            "APPROVAL_REQUIRED",
-            "This cancellation requires multi-sig approval. Please initiate an approval request.",
-            409,
-          );
-        }
-      }
-    } else {
-      if (stream.ownership === "unclaimed" || !stream.senderAddress) {
-        return createErrorResponse(
-          "SENDER_UNKNOWN",
-          "Stream is unclaimed and cannot be cancelled",
-          403,
-        );
-      }
-
-      const jwtActor = tryAuthenticateRequest(request);
-      if (!jwtActor || jwtActor.walletAddress !== stream.senderAddress) {
+      if (!actorAddress && !orgDb.streamOwnership.get(id)) {
+        // No actor header and stream is not org-owned — reject unauthenticated cancel.
         return createErrorResponse(
           "SENDER_AUTH_REQUIRED",
           "Only the stream sender can cancel this stream",

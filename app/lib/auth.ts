@@ -294,6 +294,7 @@ export function requireAuditLogAccess(
   const actor = tryAuthenticateRequest(request);
   if (!actor) {
     return createErrorResponse(
+      request,
       "UNAUTHORIZED",
       "Missing or invalid authorization header",
       401,
@@ -304,6 +305,7 @@ export function requireAuditLogAccess(
     access === "export" ? AUDIT_LOG_EXPORT_ROLES : AUDIT_LOG_READ_ROLES;
   if (!allowedRoles.has(actor.role)) {
     return createErrorResponse(
+      request,
       "FORBIDDEN",
       "You do not have permission to access audit logs",
       403,

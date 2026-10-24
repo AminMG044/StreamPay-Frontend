@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { validateConfig } from './app/lib/config/index';
 import {
   buildAllowedOriginSet,

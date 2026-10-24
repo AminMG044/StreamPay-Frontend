@@ -35,7 +35,7 @@ hold:
 
 1. the request method is state-changing (`POST`, `PUT`, `PATCH`, `DELETE`);
 2. the request carries **no** `Cookie` header at all;
-3. the request carries an `Authorization: Bearer …` / `Authorization: Basic …`
+3. the request carries an `Authorization: Bearer …`
    or a non-empty `X-API-Key` header.
 
 A request that carries any cookie is always checked, even when it also
