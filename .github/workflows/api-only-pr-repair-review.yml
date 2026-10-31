@@ -1,0 +1,167 @@
+{
+  "name": "Review repaired PRs through isolated CI",
+  "on": {
+    "push": {
+      "branches": [
+        "validate/api-only-pr-repairs"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "api-only-pr-repair-validation",
+    "cancel-in-progress": true
+  },
+  "env": {
+    "STELLAR_NETWORK": "testnet",
+    "JWT_SECRET": "streampay-dev-secret-do-not-use-in-prod",
+    "NODE_ENV": "test",
+    "CI": "true",
+    "STREAMPAY_ADMIN_ADDRESS": "GADMIN_DEV_PLACEHOLDER_DO_NOT_USE_IN_PROD",
+    "WEBHOOK_SECRET": "dev-webhook-secret-do-not-use-in-prod-1234567890",
+    "AUDIT_CHAIN_KEY": "dev-audit-chain-key-do-not-use-in-prod"
+  },
+  "jobs": {
+    "review": {
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 20,
+      "strategy": {
+        "fail-fast": false,
+        "max-parallel": 4,
+        "matrix": {
+          "include": [
+            {
+              "pr": "1847",
+              "sha": "c9a696acaffe7838c6816f4f2bc92fd1a1404360",
+              "tests": "npx jest --runInBand app/lib/multi-recipient",
+              "lint": "npx eslint app/lib/multi-recipient.raw.test.ts app/lib/multi-recipient.ts"
+            },
+            {
+              "pr": "1848",
+              "sha": "8ea5a474e828642f81ed1b00cc42d9696bd4cbd2",
+              "tests": "npx jest --runInBand app/lib/ssrf-guard app/lib/stream-validation",
+              "lint": "npx eslint 'app/api/streams/[id]/webhooks/test/route.ts' app/lib/ssrf-guard.test.ts app/lib/ssrf-guard.ts app/lib/stream-validation.ts"
+            },
+            {
+              "pr": "1849",
+              "sha": "a162c47ec47873f5ddd2d5465642fc6d7d02a6d3",
+              "tests": "npx jest --runInBand --runTestsByPath \"app/api/streams/[id]/lifecycle-transitions.test.ts\"",
+              "lint": "npx eslint 'app/api/streams/[id]/lifecycle-transitions.test.ts' 'app/api/streams/[id]/settle/route.ts'"
+            },
+            {
+              "pr": "1850",
+              "sha": "6f06456baa0a4600bc678eb32f4ef2e20e6cdc64",
+              "tests": "npx jest --runInBand app/lib/idempotency --testPathIgnorePatterns=/node_modules/",
+              "lint": "npx eslint app/lib/idempotency.reservation.test.ts app/lib/idempotency.ts"
+            },
+            {
+              "pr": "1851",
+              "sha": "386225cc0e06a996e3a88ec6cdb3108f5558dcda",
+              "tests": "npx jest --runInBand app/templates app/lib/repositories/templates app/api/streams/template",
+              "lint": "npx eslint app/api/streams/template/route.ts app/lib/repositories/templates.test.ts app/lib/repositories/templates.ts app/templates/error.tsx app/templates/loading.tsx app/templates/page.test.tsx app/templates/page.tsx app/templates/server-page.test.tsx app/templates/templates-client.tsx"
+            },
+            {
+              "pr": "1854",
+              "sha": "5bcf347b94642eb6150cc06b394e90a5489cff1d",
+              "tests": "npx jest --runInBand --runTestsByPath \"app/api/[...notfound]/route.test.ts\"",
+              "lint": "npx eslint 'app/api/[...notfound]/route.test.ts' 'app/api/[...notfound]/route.ts'"
+            },
+            {
+              "pr": "1856",
+              "sha": "c1b263e816ba72a038f817e12b2283c7dba8ebc5",
+              "tests": "npx jest --runInBand app/lib/auth-session",
+              "lint": "npx eslint app/layout.tsx app/lib/auth-session.test.tsx app/lib/auth-session.tsx"
+            }
+          ]
+        }
+      },
+      "name": "PR ${{ matrix.pr }} regressions",
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "${{ matrix.sha }}",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Inspect tracked tree before execution",
+          "run": "python3 - <<'SCAN'\nimport pathlib,re,subprocess\nbad=[]\nfor name in filter(None,subprocess.check_output(['git','ls-files','-z']).decode().split(chr(0))):\n path=pathlib.Path(name)\n if not path.is_file():continue\n if name=='api.js' or name.endswith(('.lkf','.lfk','.llf')):bad.append(name+': forbidden payload path')\n data=path.read_bytes()\n if bytes([0]) in data:continue\n text=data.decode(errors='replace')\n if name.endswith(('.js','.jsx','.mjs','.cjs','.ts','.tsx','.json','.sh')) and re.search(r'[ \\t]{200,}\\S',text):bad.append(name+': hidden whitespace payload')\n if name.endswith('package.json') and re.search(r'node\\s+api\\.js',text):bad.append(name+': suspicious launcher')\n if name.startswith('.vscode/') and ('folderOpen' in text or 'allowAutomaticTasks' in text):bad.append(name+': auto-run task')\nif bad:raise SystemExit('\\n'.join(bad))\nprint('Tracked-tree source/config scan passed.')\n\nSCAN"
+        },
+        {
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": "22"
+          }
+        },
+        {
+          "name": "Install without lifecycle scripts",
+          "run": "npm ci --ignore-scripts"
+        },
+        {
+          "name": "Focused issue regressions",
+          "run": "${{ matrix.tests }}"
+        },
+        {
+          "name": "Lint changed source",
+          "if": "always()",
+          "run": "${{ matrix.lint }}"
+        },
+        {
+          "name": "Production build",
+          "if": "always()",
+          "run": "npm run build",
+          "env": {
+            "NODE_ENV": "production"
+          }
+        }
+      ]
+    },
+    "baseline": {
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 20,
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "c7a4771cfb20a6fc55bc8357f2c3e6e3f2807be1",
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": "22"
+          }
+        },
+        {
+          "run": "npm ci --ignore-scripts"
+        },
+        {
+          "name": "Baseline core types",
+          "run": "npm run typecheck:core"
+        },
+        {
+          "name": "Baseline full tests",
+          "if": "always()",
+          "run": "npm test -- --runInBand"
+        },
+        {
+          "name": "Baseline lint",
+          "if": "always()",
+          "run": "npm run lint -- --max-warnings=100000"
+        },
+        {
+          "name": "Baseline production build",
+          "if": "always()",
+          "run": "npm run build",
+          "env": {
+            "NODE_ENV": "production"
+          }
+        }
+      ]
+    }
+  }
+}
