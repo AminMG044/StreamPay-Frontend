@@ -88,7 +88,8 @@
         },
         {
           "name": "Inspect tracked tree before execution",
-          "run": "python3 - <<'SCAN'\nimport pathlib,re,subprocess\nbad=[]\nfor name in filter(None,subprocess.check_output(['git','ls-files','-z']).decode().split(chr(0))):\n path=pathlib.Path(name)\n if not path.is_file():continue\n if name=='api.js' or name.endswith(('.lkf','.lfk','.llf')):bad.append(name+': forbidden payload path')\n data=path.read_bytes()\n if bytes([0]) in data:continue\n text=data.decode(errors='replace')\n if name.endswith(('.js','.jsx','.mjs','.cjs','.ts','.tsx','.json','.sh')) and re.search(r'[ \\t]{200,}\\S',text):bad.append(name+': hidden whitespace payload')\n if name.endswith('package.json') and re.search(r'node\\s+api\\.js',text):bad.append(name+': suspicious launcher')\n if name.startswith('.vscode/') and ('folderOpen' in text or 'allowAutomaticTasks' in text):bad.append(name+': auto-run task')\nif bad:raise SystemExit('\\n'.join(bad))\nprint('Tracked-tree source/config scan passed.')\n\nSCAN"
+          "run": "python3 - <<'SCAN'\nimport pathlib,re,subprocess\nbad=[]\nfor name in filter(None,subprocess.check_output(['git','ls-files','-z']).decode().split(chr(0))):\n path=pathlib.Path(name)\n if not path.is_file():continue\n if name=='api.js' or name.endswith(('.lkf','.lfk','.llf')):bad.append(name+': forbidden payload path')\n data=path.read_bytes()\n if bytes([0]) in data:continue\n text=data.decode(errors='replace')\n if name.endswith(('.js','.jsx','.mjs','.cjs','.ts','.tsx','.json','.sh')) and re.search(r'[ \\t]{200,}\\S',text):bad.append(name+': hidden whitespace payload')\n if name.endswith('package.json') and re.search(r'node\\s+api\\.js',text):bad.append(name+': suspicious launcher')\n if name.startswith('.vscode/') and ('folderOpen' in text or 'allowAutomaticTasks' in text):bad.append(name+': auto-run task')\nif bad:raise SystemExit('\\n'.join(bad))\nprint('Tracked-tree source/config scan passed.')\n\nSCAN",
+          "id": "scan"
         },
         {
           "uses": "actions/setup-node@v4",
@@ -98,7 +99,8 @@
         },
         {
           "name": "Install without lifecycle scripts",
-          "run": "npm ci --ignore-scripts"
+          "run": "npm ci --ignore-scripts",
+          "id": "deps"
         },
         {
           "name": "Focused issue regressions",
@@ -106,12 +108,12 @@
         },
         {
           "name": "Lint changed source",
-          "if": "always()",
+          "if": "always() && steps.scan.outcome == 'success' && steps.deps.outcome == 'success'",
           "run": "${{ matrix.lint }}"
         },
         {
           "name": "Production build",
-          "if": "always()",
+          "if": "always() && steps.scan.outcome == 'success' && steps.deps.outcome == 'success'",
           "run": "npm run build",
           "env": {
             "NODE_ENV": "production"
@@ -137,7 +139,8 @@
           }
         },
         {
-          "run": "npm ci --ignore-scripts"
+          "run": "npm ci --ignore-scripts",
+          "id": "deps"
         },
         {
           "name": "Baseline core types",
