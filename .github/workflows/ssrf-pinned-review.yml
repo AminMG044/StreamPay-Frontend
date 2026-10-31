@@ -1,0 +1,94 @@
+{
+  "name": "Validate pinned webhook transport",
+  "on": {
+    "push": {
+      "branches": [
+        "validate/ssrf-pinned-transport"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "ssrf-pinned-transport-validation",
+    "cancel-in-progress": true
+  },
+  "env": {
+    "STELLAR_NETWORK": "testnet",
+    "JWT_SECRET": "streampay-dev-secret-do-not-use-in-prod",
+    "NODE_ENV": "test",
+    "CI": "true",
+    "STREAMPAY_ADMIN_ADDRESS": "GADMIN_DEV_PLACEHOLDER_DO_NOT_USE_IN_PROD",
+    "WEBHOOK_SECRET": "dev-webhook-secret-do-not-use-in-prod-1234567890",
+    "AUDIT_CHAIN_KEY": "dev-audit-chain-key-do-not-use-in-prod"
+  },
+  "jobs": {
+    "review": {
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 20,
+      "strategy": {
+        "fail-fast": false,
+        "max-parallel": 4,
+        "matrix": {
+          "include": [
+            {
+              "pr": "1848",
+              "sha": "7874aa929c89d4b6532ae9e111b6de94ad5b41cc",
+              "tests": "npx jest --runInBand app/lib/outbound-url app/lib/ssrf-guard app/lib/stream-validation app/lib/webhook-delivery\nnpx jest --runInBand --runTestsByPath \"app/api/streams/[id]/webhooks/test/route.test.ts\"",
+              "lint": "npx eslint 'app/api/streams/[id]/webhooks/test/route.test.ts' 'app/api/streams/[id]/webhooks/test/route.ts' 'app/api/v2/streams/[id]/route.ts' app/lib/outbound-url.test.ts app/lib/outbound-url.transport.test.ts app/lib/outbound-url.ts app/lib/ssrf-guard.test.ts app/lib/ssrf-guard.ts app/lib/stream-validation.ts app/lib/webhook-delivery.ts jest.config.js"
+            }
+          ]
+        }
+      },
+      "name": "PR ${{ matrix.pr }} regressions",
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "${{ matrix.sha }}",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Inspect tracked tree before execution",
+          "run": "python3 - <<'SCAN'\nimport pathlib,re,subprocess\nbad=[]\nfor name in filter(None,subprocess.check_output(['git','ls-files','-z']).decode().split(chr(0))):\n path=pathlib.Path(name)\n if not path.is_file():continue\n if name=='api.js' or name.endswith(('.lkf','.lfk','.llf')):bad.append(name+': forbidden payload path')\n data=path.read_bytes()\n if bytes([0]) in data:continue\n text=data.decode(errors='replace')\n if name.endswith(('.js','.jsx','.mjs','.cjs','.ts','.tsx','.json','.sh')) and re.search(r'[ \\t]{200,}\\S',text):bad.append(name+': hidden whitespace payload')\n if name.endswith('package.json') and re.search(r'node\\s+api\\.js',text):bad.append(name+': suspicious launcher')\n if name.startswith('.vscode/') and ('folderOpen' in text or 'allowAutomaticTasks' in text):bad.append(name+': auto-run task')\nif bad:raise SystemExit('\\n'.join(bad))\nprint('Tracked-tree source/config scan passed.')\n\nSCAN",
+          "id": "scan"
+        },
+        {
+          "uses": "actions/setup-node@v4",
+          "with": {
+            "node-version": "22"
+          }
+        },
+        {
+          "name": "Install without lifecycle scripts",
+          "run": "npm ci --ignore-scripts",
+          "id": "deps"
+        },
+        {
+          "name": "Focused issue regressions",
+          "run": "${{ matrix.tests }}"
+        },
+        {
+          "name": "Lint changed source",
+          "if": "always() && steps.scan.outcome == 'success' && steps.deps.outcome == 'success'",
+          "run": "${{ matrix.lint }}"
+        },
+        {
+          "name": "Production build",
+          "if": "always() && steps.scan.outcome == 'success' && steps.deps.outcome == 'success'",
+          "run": "npm run build",
+          "env": {
+            "NODE_ENV": "production"
+          }
+        },
+        {
+          "name": "Blocking core typecheck",
+          "if": "always() && steps.scan.outcome == 'success' && steps.deps.outcome == 'success'",
+          "run": "npm run typecheck:core"
+        }
+      ]
+    }
+  }
+}
